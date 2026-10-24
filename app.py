@@ -4,8 +4,16 @@ import base64
 import re
 import os
 import io
-import speech_recognition as sr
-from gtts import gTTS
+try:
+    import speech_recognition as sr
+except ImportError:
+    sr = None
+
+try:
+    from gtts import gTTS
+except ImportError:
+    gTTS = None
+
 from fpdf import FPDF
 
 # ── Page Config ────────────────────────────────────────────────────────────────
@@ -572,18 +580,42 @@ def get_topic_visuals(topic_clean: str):
 
 # ── Voice Speech-to-Text and Text-to-Speech Helpers ─────────────────────────────
 def transcribe_speech_audio(audio_bytes: bytes) -> str:
-    """Transcribes audio using SpeechRecognition with graceful error handling."""
+    """Transcribes audio using SpeechRecognition with graceful error handling and Gemini fallback."""
+    # 1. Primary: SpeechRecognition
+    if sr is not None:
+        try:
+            r = sr.Recognizer()
+            with sr.AudioFile(io.BytesIO(audio_bytes)) as source:
+                r.adjust_for_ambient_noise(source, duration=0.15)
+                audio_data = r.record(source)
+            text = r.recognize_google(audio_data)
+            if text and text.strip():
+                return text.strip()
+        except Exception:
+            pass
+
+    # 2. Fallback: Google Gemini
     try:
-        r = sr.Recognizer()
-        with sr.AudioFile(io.BytesIO(audio_bytes)) as source:
-            audio = r.record(source)
-        text = r.recognize_google(audio)
-        return text.strip()
+        import google.generativeai as genai
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if api_key:
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel("gemini-flash-latest")
+            res = model.generate_content([
+                {"mime_type": "audio/wav", "data": audio_bytes},
+                "Transcribe this spoken research inquiry into clean text. Output only the query words without quotes or punctuation."
+            ])
+            if res.text and res.text.strip():
+                return res.text.strip()
     except Exception:
-        return ""
+        pass
+
+    return ""
 
 def generate_voice_briefing(text: str) -> bytes:
     """Generates MP3 audio for Julian Hayes's spoken executive summary."""
+    if gTTS is None:
+        return b""
     try:
         clean_text = re.sub(r'#+\s*', '', text)
         clean_text = re.sub(r'[*_`\[\]]', '', clean_text)
@@ -786,8 +818,8 @@ topic_input = st.text_area(
     key="research_topic_text",
 )
 
-# Voice Audio Recorder
-with st.expander("🎙️ Speak your research topic (Voice Recorder)", expanded=False):
+# Voice Audio Recorder (Direct microphone capture)
+with st.expander("🎙️ Speak your research topic (Voice Recorder)", expanded=True):
     audio_val = st.audio_input("Record audio from your microphone:", key="voice_mic_input")
     if audio_val is not None:
         audio_bytes = audio_val.getvalue()
@@ -797,12 +829,24 @@ with st.expander("🎙️ Speak your research topic (Voice Recorder)", expanded=
             with st.spinner("🎙️ Transcribing spoken research query..."):
                 transcribed = transcribe_speech_audio(audio_bytes)
                 if transcribed:
+                    st.session_state["research_topic_text"] = transcribed
                     st.session_state.selected_topic = transcribed
-                    st.success(f"✨ Transcribed voice: **\"{transcribed}\"**")
-                    time.sleep(0.5)
+                    st.session_state["voice_input_active"] = True
+                    st.success(f"✨ Transcribed voice input: **\"{transcribed}\"**")
+                    time.sleep(0.4)
                     st.rerun()
                 else:
-                    st.info("🎙️ Voice recorded. If speech wasn't recognized, you can also type your query above.")
+                    st.info("🎙️ Voice recorded. Speak clearly into your microphone, or type your query directly above.")
+
+if st.session_state.get("voice_input_active") and st.session_state.get("selected_topic"):
+    st.markdown(f"""
+    <div style="background:#f0f9ff; border:1px solid #7dd3fc; border-radius:10px; padding:8px 14px; margin-bottom:12px; display:flex; align-items:center; gap:8px;">
+      <span style="font-size:1.1rem;">🎙️</span>
+      <span style="font-size:0.84rem; color:#0369a1; font-weight:700;">
+        Voice Query Loaded: <span style="color:#0f172a;">"{st.session_state.selected_topic}"</span>
+      </span>
+    </div>
+    """, unsafe_allow_html=True)
 
 st.markdown('<div class="ip-search-action">', unsafe_allow_html=True)
 run_clicked = st.button("⚡ Let's Search", disabled=st.session_state.running)
@@ -811,8 +855,13 @@ st.markdown("</div>", unsafe_allow_html=True)
 
 # ── Dynamic Pipeline Execution ───────────────────────────────────────────────
 if run_clicked:
-    if not topic_input.strip():
-        st.warning("⚠️ Please provide a topic or select one of the suggested prompts above.")
+    effective_topic = (
+        st.session_state.get("research_topic_text", "").strip()
+        or topic_input.strip()
+        or st.session_state.get("selected_topic", "").strip()
+    )
+    if not effective_topic:
+        st.warning("⚠️ Please provide a topic or record your voice query above.")
     else:
         st.session_state.result = None
         st.session_state.error = None
@@ -829,20 +878,20 @@ if run_clicked:
             state = {}
 
             # Step 1: Alex Vance (Search)
-            with anim_box, st.spinner("🔍 Alex Vance is scanning the live web for recent and authoritative sources..."):
-                status_box.markdown("""
+            with anim_box, st.spinner(f"🔍 Alex Vance is scanning the live web for: '{effective_topic}'..."):
+                status_box.markdown(f"""
                 <div class="ip-flow-step active">
                   <span>🔍</span>
-                  <div><b>Step 1/4 · Alex Vance:</b> Searching top digital databases and intelligence sources...</div>
+                  <div><b>Step 1/4 · Alex Vance:</b> Searching top digital databases for <i>"{effective_topic}"</i>...</div>
                 </div>
                 """, unsafe_allow_html=True)
                 sa = build_search_agent()
-                sr = sa.invoke({"messages": [("user", f"Find recent, reliable and detailed information about: {topic_input}")]})
+                sr = sa.invoke({"messages": [("user", f"Find recent, reliable and detailed information about: {effective_topic}")]})
                 state["search_results"] = sr["messages"][-1].content
 
             # Step 2: Dr. Elena Rostova (Reader / Scraper)
             with anim_box, st.spinner("📖 Dr. Elena Rostova is scraping and parsing in-depth whitepapers & articles..."):
-                status_box.markdown("""
+                status_box.markdown(f"""
                 <div class="ip-flow-step done"><span>✓</span> <b>Step 1 Complete:</b> Alex Vance gathered global intelligence.</div>
                 <div class="ip-flow-step active">
                   <span>📖</span>
@@ -851,7 +900,7 @@ if run_clicked:
                 """, unsafe_allow_html=True)
                 ra = build_reader_agent()
                 rr = ra.invoke({"messages": [("user",
-                    f"Based on the following search results about '{topic_input}', "
+                    f"Based on the following search results about '{effective_topic}', "
                     f"pick the most relevant URL and scrape it for deeper content.\n\n"
                     f"Search Results:\n{str(state['search_results'])[:800]}")]})
                 state["scraped_content"] = rr["messages"][-1].content
@@ -867,7 +916,7 @@ if run_clicked:
                 """, unsafe_allow_html=True)
                 combined = (f"SEARCH RESULTS:\n{state['search_results']}\n\n"
                             f"SCRAPED CONTENT:\n{state['scraped_content']}")
-                state["report"] = writer_chain.invoke({"topic": topic_input, "research": combined})
+                state["report"] = writer_chain.invoke({"topic": effective_topic, "research": combined})
 
             # Step 4: Sophia Sterling (Critic)
             with anim_box, st.spinner("⚖️ Sophia Sterling is performing rigorous editorial review and scoring..."):
@@ -887,7 +936,7 @@ if run_clicked:
             """, unsafe_allow_html=True)
             anim_box.empty()
             st.session_state.result = state
-            st.session_state.selected_topic = topic_input
+            st.session_state.selected_topic = effective_topic
 
         except Exception as e:
             st.session_state.error = str(e)

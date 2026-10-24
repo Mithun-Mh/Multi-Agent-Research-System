@@ -8,27 +8,25 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Model Initialization
-llm = ChatGoogleGenerativeAI(model = "gemini-flash-lite-latest",temperature=0)
+llm = ChatGoogleGenerativeAI(model="gemini-flash-lite-latest", temperature=0)
 
 
 # 1st Agent : Search Agent
 def build_search_agent():
     return create_agent(
-        model= llm,
+        model=llm,
         tools=[web_search],
-       
     )
 
 # 2nd Agent : Reader Agent
 def build_reader_agent():
     return create_agent(
-        model= llm,
+        model=llm,
         tools=[scrape_url],
-
     )
 
 
-#writer chain 
+# writer chain 
 
 writer_prompt = ChatPromptTemplate.from_messages([
     ("system", "You are an expert research writer. Write clear, structured and insightful reports."),
@@ -53,7 +51,7 @@ writer_chain = writer_prompt | llm | StrOutputParser()
 
 
 
-#critic_chain 
+# critic_chain 
 
 critic_prompt = ChatPromptTemplate.from_messages([
      ("system", "You are a sharp and constructive research critic. Be honest and specific."),
